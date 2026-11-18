@@ -18,6 +18,9 @@ message SetAttribute {
 }
 
 message RoutingRule {
+  // Stable identifier of this rule. It is included in routing errors and logs.
+  string rule_id = 19;
+
   oneof target_tag {
     // Tag of outbound that this rule is pointing to.
     string tag = 1;
@@ -143,9 +146,14 @@ message Config {
   DomainStrategy domain_strategy = 1;
   repeated RoutingRule rule = 2;
   repeated BalancingRule balancing_rule = 3;
+  // Version of this routing rule set. It must increase on every hot update.
+  uint64 version = 4;
 }
 
 message SimplifiedRoutingRule {
+  // Stable identifier of this rule. It is included in routing errors and logs.
+  string rule_id = 19;
+
   oneof target_tag {
     // Tag of outbound that this rule is pointing to.
     string tag = 1;
@@ -197,4 +205,6 @@ message SimplifiedConfig {
   DomainStrategy domain_strategy = 1;
   repeated SimplifiedRoutingRule rule = 2;
   repeated BalancingRule balancing_rule = 3;
+  // Version of this routing rule set. It must increase on every hot update.
+  uint64 version = 4;
 }

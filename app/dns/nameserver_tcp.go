@@ -257,7 +257,7 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, domain string, clientIP n
 
 			rec, err := parseResponse(respBuf.Bytes())
 			if err != nil {
-				newError("failed to parse DNS over TCP response").Base(err).AtError().WriteToLog()
+				newError("failed to parse DNS over TCP response for domain ", r.domain).Base(err).AtError().WriteToLog()
 				return
 			}
 

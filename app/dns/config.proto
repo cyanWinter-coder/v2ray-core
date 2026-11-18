@@ -13,6 +13,11 @@ import "app/dns/fakedns/fakedns.proto";
 
 import "common/protoext/extensions.proto";
 
+message FallbackServer {
+  v2ray.core.common.net.Endpoint address = 1;
+  string tag = 2;
+}
+
 message NameServer {
   v2ray.core.common.net.Endpoint address = 1;
   bytes client_ip = 5;
@@ -40,6 +45,9 @@ message NameServer {
   optional QueryStrategy query_strategy = 8;
   optional CacheStrategy cache_strategy = 9;
   optional FallbackStrategy fallback_strategy = 10;
+
+  // Ordered fallback servers used after this name server fails.
+  repeated FallbackServer fallback_server = 12;
 }
 
 enum DomainMatchingType {
@@ -223,5 +231,7 @@ message SimplifiedNameServer {
   optional QueryStrategy query_strategy = 8;
   optional CacheStrategy cache_strategy = 9;
   optional FallbackStrategy fallback_strategy = 10;
+  // Ordered fallback servers used after this name server fails.
+  repeated FallbackServer fallback_server = 12;
   repeated v2ray.core.app.router.routercommon.GeoSite geo_domain = 68001;
 }

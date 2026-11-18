@@ -72,7 +72,11 @@ func (b *Balancer) SelectOutbounds() ([]string, error) {
 
 // GetPrincipleTarget implements routing.BalancerPrincipleTarget
 func (r *Router) GetPrincipleTarget(tag string) ([]string, error) {
-	if b, ok := r.balancers[tag]; ok {
+	snapshot := r.snapshot.Load()
+	if snapshot == nil {
+		return nil, newError("router is not initialized")
+	}
+	if b, ok := snapshot.balancers[tag]; ok {
 		if s, ok := b.strategy.(BalancingPrincipleTarget); ok {
 			candidates, err := b.SelectOutbounds()
 			if err != nil {
@@ -87,7 +91,11 @@ func (r *Router) GetPrincipleTarget(tag string) ([]string, error) {
 
 // SetOverrideTarget implements routing.BalancerOverrider
 func (r *Router) SetOverrideTarget(tag, target string) error {
-	if b, ok := r.balancers[tag]; ok {
+	snapshot := r.snapshot.Load()
+	if snapshot == nil {
+		return newError("router is not initialized")
+	}
+	if b, ok := snapshot.balancers[tag]; ok {
 		b.override.Put(target)
 		return nil
 	}
@@ -96,7 +104,11 @@ func (r *Router) SetOverrideTarget(tag, target string) error {
 
 // GetOverrideTarget implements routing.BalancerOverrider
 func (r *Router) GetOverrideTarget(tag string) (string, error) {
-	if b, ok := r.balancers[tag]; ok {
+	snapshot := r.snapshot.Load()
+	if snapshot == nil {
+		return "", newError("router is not initialized")
+	}
+	if b, ok := snapshot.balancers[tag]; ok {
 		return b.override.Get(), nil
 	}
 	return "", newError("cannot find tag")

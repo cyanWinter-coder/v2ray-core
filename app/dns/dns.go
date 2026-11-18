@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	core "github.com/v2fly/v2ray-core/v5"
 	"github.com/v2fly/v2ray-core/v5/app/dns/fakedns"
@@ -33,11 +34,18 @@ type DNS struct {
 	sync.Mutex
 	hosts         *StaticHosts
 	clients       []*Client
+	fallbacks     map[uint16][]*Client
+	clientIndexes map[*Client]int
 	ctx           context.Context
 	clientTags    map[string]bool
 	fakeDNSEngine *FakeDNSEngine
 	domainMatcher strmatcher.IndexMatcher
 	matcherInfos  []DomainMatcherInfo
+
+	traceMu    sync.RWMutex
+	lastTraces map[string]LookupTrace
+	history    []LookupTrace
+	observer   func(LookupTrace)
 }
 
 // DomainMatcherInfo contains information attached to index returned by Server.domainMatcher
@@ -67,6 +75,7 @@ func New(ctx context.Context, config *Config) (*DNS, error) {
 
 	// Create name servers
 	nsClientMap := map[int]int{}
+	fallbackClientMap := map[int][]int{}
 	for nsIdx, ns := range config.NameServer {
 		client, err := NewClient(ctx, ns, config)
 		if err != nil {
@@ -74,6 +83,30 @@ func New(ctx context.Context, config *Config) (*DNS, error) {
 		}
 		nsClientMap[nsIdx] = len(clients)
 		clients = append(clients, client)
+
+		for fallbackIdx, fallback := range ns.FallbackServer {
+			if fallback == nil || fallback.Address == nil {
+				return nil, newError("fallback server ", fallbackIdx, " for name server ",
+					ns.Tag, " has no address")
+			}
+			fallbackConfig := *ns
+			fallbackConfig.Address = fallback.Address
+			fallbackConfig.PrioritizedDomain = nil
+			fallbackConfig.OriginalRules = nil
+			fallbackConfig.FallbackServer = nil
+			fallbackConfig.Tag = fallback.Tag
+			if fallbackConfig.Tag == "" && ns.Tag != "" {
+				fallbackConfig.Tag = fmt.Sprintf("%s.fallback.%d", ns.Tag, fallbackIdx)
+			}
+			fallbackClient, err := NewClient(ctx, &fallbackConfig, config)
+			if err != nil {
+				return nil, newError("failed to create fallback client ", fallbackIdx,
+					" for name server ", ns.Tag).Base(err)
+			}
+			fallbackClient.isFallback = true
+			fallbackClientMap[nsClientMap[nsIdx]] = append(fallbackClientMap[nsClientMap[nsIdx]], len(clients))
+			clients = append(clients, fallbackClient)
+		}
 	}
 
 	// If there is no DNS client in config, add a `localhost` DNS client
@@ -82,9 +115,20 @@ func New(ctx context.Context, config *Config) (*DNS, error) {
 	}
 
 	s := &DNS{
-		hosts:   hosts,
-		clients: clients,
-		ctx:     ctx,
+		hosts:         hosts,
+		clients:       clients,
+		fallbacks:     make(map[uint16][]*Client),
+		clientIndexes: make(map[*Client]int, len(clients)),
+		ctx:           ctx,
+		lastTraces:    make(map[string]LookupTrace),
+	}
+	for idx, client := range clients {
+		s.clientIndexes[client] = idx
+	}
+	for clientIdx, fallbackIdxs := range fallbackClientMap {
+		for _, fallbackIdx := range fallbackIdxs {
+			s.fallbacks[uint16(clientIdx)] = append(s.fallbacks[uint16(clientIdx)], clients[fallbackIdx])
+		}
 	}
 
 	// Establish members related to global DNS state
@@ -270,13 +314,23 @@ func (s *DNS) LookupIPv6(domain string) ([]net.IP, error) {
 	return s.lookupIPInternal(domain, dns.IPOption{IPv6Enable: true, FakeEnable: false})
 }
 
-func (s *DNS) lookupIPInternal(domain string, option dns.IPOption) ([]net.IP, error) {
+func (s *DNS) lookupIPInternal(domain string, option dns.IPOption) (ips []net.IP, err error) {
 	if domain == "" {
 		return nil, newError("empty domain name")
 	}
 
 	// Normalize the FQDN form query
 	domain = strings.TrimSuffix(domain, ".")
+	trace := LookupTrace{
+		Domain:  domain,
+		Started: time.Now(),
+	}
+	defer func() {
+		trace.Duration = time.Since(trace.Started)
+		trace.IPs = ips
+		trace.Err = err
+		s.recordLookupTrace(trace)
+	}()
 
 	// Static host lookup
 	switch addrs := s.hosts.Lookup(domain, option); {
@@ -287,33 +341,62 @@ func (s *DNS) lookupIPInternal(domain string, option dns.IPOption) ([]net.IP, er
 	case len(addrs) == 1 && addrs[0].Family().IsDomain(): // Domain replacement
 		newError("domain replaced: ", domain, " -> ", addrs[0].Domain()).WriteToLog()
 		domain = addrs[0].Domain()
+		trace.Domain = domain
 	default: // Successfully found ip records in static host
 		newError("returning ", len(addrs), " IP(s) for domain ", domain, " -> ", addrs).WriteToLog()
+		trace.SelectedServer = "static"
 		return toNetIP(addrs)
 	}
 
 	// Name servers lookup
 	errs := []error{}
 	for _, client := range s.sortClients(domain, option) {
+		start := time.Now()
 		ips, err := client.QueryIP(s.ctx, domain, option)
+		elapsed := time.Since(start)
+		attempt := LookupAttempt{
+			Server:   client.Name(),
+			Duration: elapsed,
+			Fallback: client.isFallback,
+			Error:    err,
+		}
+		trace.Attempts = append(trace.Attempts, attempt)
 		if len(ips) > 0 {
+			trace.SelectedServer = client.Name()
+			newError("DNS lookup for domain ", domain, " succeeded via server ", client.Name(),
+				" in ", elapsed).AtInfo().WriteToLog()
 			return ips, nil
 		}
-		if err != nil {
-			errs = append(errs, err)
+		if err == nil {
+			err = dns.ErrEmptyResponse
+			trace.Attempts[len(trace.Attempts)-1].Error = err
 		}
-		if err != dns.ErrEmptyResponse { // ErrEmptyResponse is not seen as failure, so no failed log
-			newError("failed to lookup ip for domain ", domain, " at server ", client.Name()).Base(err).WriteToLog()
-		}
-		if err != context.Canceled && err != context.DeadlineExceeded && err != errExpectedIPNonMatch {
-			return nil, err // Only continue lookup for certain errors
+		errs = append(errs, err)
+		newError("DNS lookup for domain ", domain, " failed via server ", client.Name(),
+			" after ", elapsed).Base(err).AtWarning().WriteToLog()
+		if s.ctx.Err() != nil {
+			return nil, s.ctx.Err()
 		}
 	}
 
 	if len(errs) == 0 {
 		return nil, dns.ErrEmptyResponse
 	}
-	return nil, newError("returning nil for domain ", domain).Base(errors.Combine(errs...))
+	allEmpty := true
+	for _, lookupErr := range errs {
+		if lookupErr != dns.ErrEmptyResponse {
+			allEmpty = false
+			break
+		}
+	}
+	if allEmpty {
+		return nil, dns.ErrEmptyResponse
+	}
+	return nil, &LookupError{
+		Domain:    domain,
+		Attempts:  trace.Attempts,
+		LastError: errors.Combine(errs...),
+	}
 }
 
 func (s *DNS) sortClients(domain string, option dns.IPOption) []*Client {
@@ -337,13 +420,29 @@ func (s *DNS) sortClients(domain string, option dns.IPOption) []*Client {
 		clientUsed[info.clientIdx] = true
 		clients = append(clients, client)
 		clientIdxs = append(clientIdxs, int(info.clientIdx))
+		for _, fallback := range s.fallbacks[info.clientIdx] {
+			fallbackIdx := s.clientIndex(fallback)
+			if fallbackIdx < 0 || clientUsed[fallbackIdx] {
+				continue
+			}
+			clientUsed[fallbackIdx] = true
+			clients = append(clients, fallback)
+			clientIdxs = append(clientIdxs, fallbackIdx)
+		}
 	}
 
 	// Default round-robin query
 	hasDomainMatch := len(clients) > 0
 	for idx, client := range s.clients {
+		_, hasExplicitFallback := s.fallbacks[uint16(idx)]
 		switch {
 		case clientUsed[idx]:
+			continue
+		case client.isFallback:
+			continue
+		case len(client.domains) > 0 && hasExplicitFallback:
+			// A suffix-scoped primary server with explicit fallbacks is not
+			// promoted to a global default server.
 			continue
 		case !option.FakeEnable && isFakeDNS(client.server):
 			continue
@@ -355,6 +454,15 @@ func (s *DNS) sortClients(domain string, option dns.IPOption) []*Client {
 		clientUsed[idx] = true
 		clients = append(clients, client)
 		clientIdxs = append(clientIdxs, idx)
+		for _, fallback := range s.fallbacks[uint16(idx)] {
+			fallbackIdx := s.clientIndex(fallback)
+			if fallbackIdx < 0 || clientUsed[fallbackIdx] {
+				continue
+			}
+			clientUsed[fallbackIdx] = true
+			clients = append(clients, fallback)
+			clientIdxs = append(clientIdxs, fallbackIdx)
+		}
 	}
 
 	if len(domainRules) > 0 {
@@ -388,6 +496,14 @@ func (s *DNS) formatClientNames(clientIdxs []int, option dns.IPOption) []string 
 		}
 	}
 	return clientNames
+}
+
+func (s *DNS) clientIndex(client *Client) int {
+	idx, found := s.clientIndexes[client]
+	if !found {
+		return -1
+	}
+	return idx
 }
 
 var matcherTypeMap = map[routercommon.Domain_Type]DomainMatchingType{
@@ -468,6 +584,7 @@ func init() {
 				FallbackStrategy: v.FallbackStrategy,
 				SkipFallback:     v.SkipFallback,
 				Geoip:            v.Geoip,
+				FallbackServer:   v.FallbackServer,
 			}
 			for _, prioritizedDomain := range v.PrioritizedDomain {
 				nameserver.PrioritizedDomain = append(nameserver.PrioritizedDomain, &NameServer_PriorityDomain{

@@ -18,10 +18,17 @@ import (
 )
 
 type Rule struct {
+	ID            string
 	Tag           string
 	Balancer      *Balancer
 	Condition     Condition
 	SetAttributes []*SetAttribute
+}
+
+// Identifier returns the configured rule ID, or an empty string for legacy
+// rules that do not define one.
+func (r *Rule) Identifier() string {
+	return r.ID
 }
 
 func (r *Rule) GetTag() (string, error) {

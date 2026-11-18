@@ -20,6 +20,7 @@ import (
 type RouterRulesConfig struct { // nolint: revive
 	RuleList       []json.RawMessage `json:"rules"`
 	DomainStrategy string            `json:"domainStrategy"`
+	Version        uint64            `json:"version"`
 }
 
 // StrategyConfig represents a strategy config
@@ -87,6 +88,7 @@ type RouterConfig struct { // nolint: revive
 	RuleList       []json.RawMessage  `json:"rules"`
 	DomainStrategy *string            `json:"domainStrategy"`
 	Balancers      []*BalancingRule   `json:"balancers"`
+	Version        uint64             `json:"version"`
 
 	DomainMatcher string `json:"domainMatcher"`
 
@@ -121,6 +123,10 @@ func (c *RouterConfig) BuildV5(ctx context.Context) (*router.Config, error) {
 func (c *RouterConfig) Build() (*router.Config, error) {
 	config := new(router.Config)
 	config.DomainStrategy = c.getDomainStrategy()
+	config.Version = c.Version
+	if config.Version == 0 && c.Settings != nil {
+		config.Version = c.Settings.Version
+	}
 
 	if c.cfgctx == nil {
 		c.cfgctx = cfgcommon.NewConfigureLoadingContext(context.Background())

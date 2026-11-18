@@ -229,7 +229,7 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, domain string, clientIP 
 
 			rec, err := parseResponse(respBuf.Bytes())
 			if err != nil {
-				newError("failed to handle response").Base(err).AtError().WriteToLog()
+				newError("failed to handle response for domain ", r.domain).Base(err).AtError().WriteToLog()
 				return
 			}
 			s.updateIP(r, rec)

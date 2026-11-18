@@ -5,13 +5,11 @@ import (
 )
 
 func (r *Router) OverrideBalancer(balancer string, target string) error {
-	var b *Balancer
-	for tag, bl := range r.balancers {
-		if tag == balancer {
-			b = bl
-			break
-		}
+	snapshot := r.snapshot.Load()
+	if snapshot == nil {
+		return newError("router is not initialized")
 	}
+	b := snapshot.balancers[balancer]
 	if b == nil {
 		return newError("balancer '", balancer, "' not found")
 	}

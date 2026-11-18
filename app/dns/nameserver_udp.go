@@ -112,7 +112,14 @@ func (s *ClassicNameServer) Cleanup() error {
 func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_proto.Packet) {
 	ipRec, err := parseResponse(packet.Payload.Bytes())
 	if err != nil {
-		newError(s.name, " fail to parse responded DNS udp").AtError().WriteToLog()
+		var domain string
+		var parser dnsmessage.Parser
+		if header, headerErr := parser.Start(packet.Payload.Bytes()); headerErr == nil {
+			s.RLock()
+			domain = s.requests[header.ID].domain
+			s.RUnlock()
+		}
+		newError(s.name, " failed to parse DNS response for domain ", domain).Base(err).AtError().WriteToLog()
 		return
 	}
 

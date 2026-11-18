@@ -252,7 +252,7 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, domain string, clientIP n
 			}
 			rec, err := parseResponse(resp)
 			if err != nil {
-				newError("failed to handle DOH response").Base(err).AtError().WriteToLog()
+				newError("failed to handle DOH response for domain ", r.domain).Base(err).AtError().WriteToLog()
 				return
 			}
 			s.updateIP(r, rec)

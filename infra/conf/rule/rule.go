@@ -223,6 +223,7 @@ func parseFieldRule(ctx context.Context, msg json.RawMessage) (*router.RoutingRu
 	}
 
 	rule := new(router.RoutingRule)
+	rule.RuleId = rawFieldRule.ID
 	switch {
 	case len(rawFieldRule.OutboundTag) > 0:
 		rule.TargetTag = &router.RoutingRule_Tag{
@@ -388,6 +389,7 @@ func ToCidrList(ctx context.Context, ips cfgcommon.StringList) ([]*routercommon.
 
 type RouterRule struct {
 	Type        string `json:"type"`
+	ID          string `json:"id"`
 	OutboundTag string `json:"outboundTag"`
 	BalancerTag string `json:"balancerTag"`
 

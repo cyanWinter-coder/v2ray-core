@@ -5,6 +5,7 @@ package dns
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -30,8 +31,85 @@ type NameServerConfig struct {
 	Domains          []string
 	ExpectIPs        cfgcommon.StringList
 	FakeDNS          FakeDNSConfigExtend
+	FallbackServers  []*FallbackServerConfig
 
 	cfgctx context.Context
+}
+
+// FallbackServerConfig describes an ordered fallback name server.
+type FallbackServerConfig struct {
+	Address *cfgcommon.Address `json:"address"`
+	Port    uint16             `json:"port"`
+	Tag     string             `json:"tag"`
+	Network string             `json:"network"`
+}
+
+func (c *FallbackServerConfig) UnmarshalJSON(data []byte) error {
+	var address string
+	if err := json.Unmarshal(data, &address); err == nil {
+		return c.parseAddress(address)
+	}
+
+	type fallbackServerAlias FallbackServerConfig
+	var alias fallbackServerAlias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return newError("failed to parse fallback server: ", string(data)).Base(err)
+	}
+	*c = FallbackServerConfig(alias)
+	if c.Address == nil {
+		return newError("fallback server address is not specified")
+	}
+	return nil
+}
+
+func (c *FallbackServerConfig) parseAddress(raw string) error {
+	if !strings.Contains(raw, "://") {
+		raw = "udp://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return newError("invalid fallback server address: ", raw).Base(err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return newError("invalid fallback server address: ", raw)
+	}
+	if port := u.Port(); port != "" {
+		parsedPort, err := net.PortFromString(port)
+		if err != nil {
+			return newError("invalid fallback server port: ", port).Base(err)
+		}
+		c.Port = uint16(parsedPort)
+	}
+	c.Address = &cfgcommon.Address{Address: net.ParseAddress(host)}
+	c.Network = u.Scheme
+	return nil
+}
+
+func (c *FallbackServerConfig) Build() (*dns.FallbackServer, error) {
+	if c.Address == nil {
+		return nil, newError("fallback server address is not specified")
+	}
+	port := c.Port
+	if port == 0 {
+		port = 53
+	}
+	network := net.Network_UDP
+	switch strings.ToLower(c.Network) {
+	case "", "udp":
+	case "tcp":
+		network = net.Network_TCP
+	default:
+		return nil, newError("unsupported fallback server network: ", c.Network)
+	}
+	return &dns.FallbackServer{
+		Address: &net.Endpoint{
+			Network: network,
+			Address: c.Address.Build(),
+			Port:    uint32(port),
+		},
+		Tag: c.Tag,
+	}, nil
 }
 
 func (c *NameServerConfig) UnmarshalJSON(data []byte) error {
@@ -42,17 +120,20 @@ func (c *NameServerConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	var advanced struct {
-		Address          *cfgcommon.Address   `json:"address"`
-		ClientIP         *cfgcommon.Address   `json:"clientIp"`
-		Port             uint16               `json:"port"`
-		Tag              string               `json:"tag"`
-		QueryStrategy    string               `json:"queryStrategy"`
-		CacheStrategy    string               `json:"cacheStrategy"`
-		FallbackStrategy string               `json:"fallbackStrategy"`
-		SkipFallback     bool                 `json:"skipFallback"`
-		Domains          []string             `json:"domains"`
-		ExpectIPs        cfgcommon.StringList `json:"expectIps"`
-		FakeDNS          FakeDNSConfigExtend  `json:"fakedns"`
+		Address          *cfgcommon.Address      `json:"address"`
+		ClientIP         *cfgcommon.Address      `json:"clientIp"`
+		Port             uint16                  `json:"port"`
+		Tag              string                  `json:"tag"`
+		QueryStrategy    string                  `json:"queryStrategy"`
+		CacheStrategy    string                  `json:"cacheStrategy"`
+		FallbackStrategy string                  `json:"fallbackStrategy"`
+		SkipFallback     bool                    `json:"skipFallback"`
+		Domains          []string                `json:"domains"`
+		ExpectIPs        cfgcommon.StringList    `json:"expectIps"`
+		FakeDNS          FakeDNSConfigExtend     `json:"fakedns"`
+		FallbackServers  []*FallbackServerConfig `json:"fallbackServers"`
+		FallbackServer   []*FallbackServerConfig `json:"fallbackServer"`
+		Fallback         []*FallbackServerConfig `json:"fallback"`
 	}
 	if err := json.Unmarshal(data, &advanced); err == nil {
 		c.Address = advanced.Address
@@ -66,6 +147,9 @@ func (c *NameServerConfig) UnmarshalJSON(data []byte) error {
 		c.Domains = advanced.Domains
 		c.ExpectIPs = advanced.ExpectIPs
 		c.FakeDNS = advanced.FakeDNS
+		c.FallbackServers = append(c.FallbackServers, advanced.FallbackServers...)
+		c.FallbackServers = append(c.FallbackServers, advanced.FallbackServer...)
+		c.FallbackServers = append(c.FallbackServers, advanced.Fallback...)
 		return nil
 	}
 
@@ -176,6 +260,18 @@ func (c *NameServerConfig) Build() (*dns.NameServer, error) {
 		fallbackStrategy = nil
 	}
 
+	var fallbackServers []*dns.FallbackServer
+	for idx, fallback := range c.FallbackServers {
+		if fallback == nil {
+			return nil, newError("fallback server ", idx, " is nil")
+		}
+		fallbackConfig, err := fallback.Build()
+		if err != nil {
+			return nil, newError("invalid fallback server ", idx).Base(err)
+		}
+		fallbackServers = append(fallbackServers, fallbackConfig)
+	}
+
 	return &dns.NameServer{
 		Address: &net.Endpoint{
 			Network: net.Network_UDP,
@@ -192,6 +288,7 @@ func (c *NameServerConfig) Build() (*dns.NameServer, error) {
 		Geoip:             geoipList,
 		OriginalRules:     originalRules,
 		FakeDns:           fakeDNS,
+		FallbackServer:    fallbackServers,
 	}, nil
 }
 

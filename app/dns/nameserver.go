@@ -34,6 +34,7 @@ type Client struct {
 	queryStrategy    dns.IPOption
 	cacheStrategy    CacheStrategy
 	fallbackStrategy FallbackStrategy
+	isFallback       bool
 
 	domains   []string
 	expectIPs []*router.GeoIPMatcher
